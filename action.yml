@@ -46,22 +46,16 @@ runs:
 
     - name: Publish to Confluence
       run: |
-        ARGS="--atlassianUserName \"${{ inputs.atlassianUserName }}\""
-        ARGS="$ARGS --atlassianApiToken \"${{ inputs.atlassianApiToken }}\""
-        ARGS="$ARGS --configFile \"${{ inputs.configFile }}\""
-        ARGS="$ARGS --contentRoot \"${{ inputs.folderToPublish }}\""
-        ARGS="$ARGS --firstHeaderPageTitle"
-        
-        if [ "${{ inputs.validateOnly }}" = "true" ]; then
-          ARGS="$ARGS --validateOnly"
-        fi
-        
-        if [ "${{ inputs.dryRun }}" = "true" ]; then
-          ARGS="$ARGS --dryRun"
-        fi
-        
-        eval "node ${{ github.action_path }}/packages/cli/dist/index.js $ARGS"
+        node ${{ github.action_path }}/packages/cli/dist/index.js \
+          --userName "${{ inputs.atlassianUserName }}" \
+          --apiToken "${{ inputs.atlassianApiToken }}" \
+          --contentRoot "${{ inputs.folderToPublish }}" \
+          --firstHeaderPageTitle \
+          ${{ inputs.validateOnly == 'true' && '--validateOnly' || '' }} \
+          ${{ inputs.dryRun == 'true' && '--dryRun' || '' }}
       shell: bash
+      env:
+        CONFLUENCE_CONFIG_FILE: ${{ inputs.configFile }}
 
 branding:
   icon: 'upload-cloud'
