@@ -5,6 +5,11 @@ import { folderFile } from "./FolderFile";
 import { JSONDocNode } from "@atlaskit/editor-json-transformer";
 import { LocalAdfFileTreeNode } from "./Publisher";
 import { ConfluenceSettings } from "./Settings";
+import {
+	validateTitleUniqueness,
+	formatValidationResult,
+	ValidationResult,
+} from "./Validator";
 
 const findCommonPath = (paths: string[]): string => {
 	const [firstPath, ...rest] = paths;
@@ -68,7 +73,6 @@ const processNode = (commonPath: string, node: LocalAdfFileTreeNode) => {
 			(child) => path.parse(child.name).name === node.name,
 		);
 		if (!indexFile) {
-			// Support FolderFile with a file name of "index.md"
 			indexFile = node.children.find((child) =>
 				["index", "README", "readme"].includes(
 					path.parse(child.name).name,
@@ -107,10 +111,31 @@ const processNode = (commonPath: string, node: LocalAdfFileTreeNode) => {
 	);
 };
 
+export interface FolderStructureResult {
+	tree: LocalAdfFileTreeNode;
+	validation: ValidationResult;
+}
+
 export const createFolderStructure = (
 	markdownFiles: MarkdownFile[],
 	settings: ConfluenceSettings,
 ): LocalAdfFileTreeNode => {
+	const result = createFolderStructureWithValidation(markdownFiles, settings);
+
+	if (!result.validation.valid) {
+		const formattedErrors = formatValidationResult(result.validation);
+		throw new Error(
+			`Validation failed:\n${formattedErrors}\n\nUse --dry-run or --validate-only to see all issues without publishing.`,
+		);
+	}
+
+	return result.tree;
+};
+
+export const createFolderStructureWithValidation = (
+	markdownFiles: MarkdownFile[],
+	settings: ConfluenceSettings,
+): FolderStructureResult => {
 	const commonPath = findCommonPath(
 		markdownFiles.map((file) => file.absoluteFilePath),
 	);
@@ -123,24 +148,10 @@ export const createFolderStructure = (
 
 	processNode(commonPath, rootNode);
 
-	checkUniquePageTitle(rootNode);
+	const validation = validateTitleUniqueness(rootNode);
 
-	return rootNode;
+	return {
+		tree: rootNode,
+		validation,
+	};
 };
-
-function checkUniquePageTitle(
-	rootNode: LocalAdfFileTreeNode,
-	pageTitles: Set<string> = new Set<string>(),
-) {
-	const currentPageTitle = rootNode.file?.pageTitle ?? "";
-
-	if (pageTitles.has(currentPageTitle)) {
-		throw new Error(
-			`Page title "${currentPageTitle}" is not unique across all files.`,
-		);
-	}
-	pageTitles.add(currentPageTitle);
-	rootNode.children.forEach((child) =>
-		checkUniquePageTitle(child, pageTitles),
-	);
-}

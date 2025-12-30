@@ -37,7 +37,19 @@ export function prepareAdfToUpload(
 	const fileToPageIdMap: Record<string, ConfluenceAdfFile> = {};
 
 	confluencePagesToPublish.forEach((node) => {
+		// Use absoluteFilePath (relative path from content root) as the key
+		// This allows proper resolution of path-based links
+		const normalizedPath = normalizeFilePath(node.file.absoluteFilePath);
+		fileToPageIdMap[normalizedPath] = node.file;
+
+		// Also add by filename for backward compatibility with simple wikilinks
 		fileToPageIdMap[node.file.fileName] = node.file;
+
+		// Add by page title for wikilinks that use the page title
+		// e.g., [[Standards]] should match a page with title "Standards"
+		if (node.file.pageTitle) {
+			fileToPageIdMap[node.file.pageTitle] = node.file;
+		}
 	});
 
 	confluencePagesToPublish.forEach((confluenceNode) => {
@@ -47,8 +59,8 @@ export function prepareAdfToUpload(
 			result.content = [p()];
 		}
 
-		result = processWikilinkToActualLink(
-			confluenceNode.file.fileName,
+		result = processLinksToConfluence(
+			confluenceNode.file.absoluteFilePath,
 			result,
 			fileToPageIdMap,
 			settings,
@@ -651,8 +663,109 @@ function extractInlineComments(adf: JSONDocNode) {
 	return result;
 }
 
-function processWikilinkToActualLink(
-	currentFileName: string,
+/**
+ * Normalizes a file path for consistent lookup in the file map.
+ * Removes leading slashes and ensures consistent format.
+ */
+function normalizeFilePath(filePath: string): string {
+	// Remove leading slash if present
+	let normalized = filePath.startsWith("/") ? filePath.slice(1) : filePath;
+	// Ensure .md extension
+	if (!normalized.endsWith(".md")) {
+		normalized = `${normalized}.md`;
+	}
+	return normalized;
+}
+
+/**
+ * Resolves a link path relative to the current file's location.
+ * Handles:
+ * - Page titles (e.g., "Standards" -> page with title "Standards")
+ * - Absolute paths from content root (e.g., "features/search/README")
+ * - Relative paths (e.g., "../README")
+ * - Simple filenames (e.g., "README")
+ */
+function resolveLinkPath(
+	linkPath: string,
+	currentFilePath: string,
+	fileToPageIdMap: Record<string, ConfluenceAdfFile>,
+): ConfluenceAdfFile | undefined {
+	// Normalize the link path
+	let normalizedLink = linkPath;
+
+	// Remove .md extension if present (we'll add it back for path-based lookups)
+	if (normalizedLink.endsWith(".md")) {
+		normalizedLink = normalizedLink.slice(0, -3);
+	}
+
+	// Get the directory of the current file
+	const currentDir = currentFilePath.replace(/\/[^/]+$/, "") || "";
+
+	// Try different resolution strategies in order of precedence:
+
+	// 1. Try as a page title first (most common for wikilinks like [[Standards]])
+	if (fileToPageIdMap[normalizedLink]) {
+		return fileToPageIdMap[normalizedLink];
+	}
+
+	// 2. Try as an absolute path from content root
+	const absolutePath = normalizeFilePath(normalizedLink);
+	if (fileToPageIdMap[absolutePath]) {
+		return fileToPageIdMap[absolutePath];
+	}
+
+	// 3. Try as a relative path from the current file's directory
+	if (currentDir) {
+		const relativePath = normalizeFilePath(
+			resolvePath(currentDir, normalizedLink),
+		);
+		if (fileToPageIdMap[relativePath]) {
+			return fileToPageIdMap[relativePath];
+		}
+	}
+
+	// 4. Try just the filename (backward compatibility)
+	const fileName = normalizedLink.split("/").pop() + ".md";
+	if (fileToPageIdMap[fileName]) {
+		return fileToPageIdMap[fileName];
+	}
+
+	return undefined;
+}
+
+/**
+ * Simple path resolution for relative paths.
+ * Handles .. and . segments.
+ */
+function resolvePath(basePath: string, relativePath: string): string {
+	// Handle absolute paths
+	if (relativePath.startsWith("/")) {
+		return relativePath;
+	}
+
+	const baseParts = basePath.split("/").filter(Boolean);
+	const relativeParts = relativePath.split("/");
+
+	for (const part of relativeParts) {
+		if (part === "..") {
+			baseParts.pop();
+		} else if (part !== "." && part !== "") {
+			baseParts.push(part);
+		}
+	}
+
+	return baseParts.join("/");
+}
+
+/**
+ * Processes all links in the ADF document and converts them to Confluence URLs.
+ * Handles:
+ * - Wikilinks: [[PageName]] or [[path/to/Page]]
+ * - Standard markdown links: [text](path/to/page.md) or [text](../relative/path.md)
+ * - Mentions: [[mention:user-id]]
+ */
+function processLinksToConfluence(
+	currentFilePath: string,
 	adf: JSONDocNode,
 	fileToPageIdMap: Record<string, ConfluenceAdfFile>,
 	settings: ConfluenceSettings,
@@ -665,42 +778,25 @@ function processWikilinkToActualLink(
 				node.marks[0].type === "link" &&
 				node.marks[0].attrs
 			) {
-				if (
-					typeof node.marks[0].attrs["href"] === "string" &&
-					node.marks[0].attrs["href"].startsWith("wikilink")
-				) {
-					const wikilinkUrl = new URL(node.marks[0].attrs["href"]);
-
-					const pathName = decodeURI(wikilinkUrl.pathname);
-					const pagename =
-						wikilinkUrl.pathname !== ""
-							? `${pathName}.md`
-							: currentFileName;
-					const linkPage = fileToPageIdMap[pagename];
-
-					if (linkPage) {
-						const confluenceUrl = `${settings.confluenceBaseUrl}/wiki/spaces/${linkPage.spaceKey}/pages/${linkPage.pageId}${wikilinkUrl.hash}`;
-						node.marks[0].attrs["href"] = confluenceUrl;
-						if (node.text === `${pathName}${wikilinkUrl.hash}`) {
-							node.type = "inlineCard";
-							node.attrs = {
-								url: node.marks[0].attrs["href"],
-							};
-							delete node.marks;
-							delete node.text;
-							return node;
-						}
-					} else {
-						delete node.marks[0];
-					}
-					return node;
+				const href = node.marks[0].attrs["href"];
+				if (typeof href !== "string") {
+					return;
 				}
-				if (
-					typeof node.marks[0].attrs["href"] === "string" &&
-					node.marks[0].attrs["href"].startsWith("mention:")
-				) {
-					const mentionUrl = new URL(node.marks[0].attrs["href"]);
 
+				// Handle wikilinks (wikilinks:PageName or wikilinks:path/to/Page)
+				if (href.startsWith("wikilink")) {
+					return processWikilink(
+						node,
+						href,
+						currentFilePath,
+						fileToPageIdMap,
+						settings,
+					);
+				}
+
+				// Handle mentions
+				if (href.startsWith("mention:")) {
+					const mentionUrl = new URL(href);
 					node = {
 						type: "mention",
 						attrs: {
@@ -708,13 +804,171 @@ function processWikilinkToActualLink(
 							text: node.text,
 						},
 					};
-
 					return node;
+				}
+
+				// Handle standard markdown relative links
+				if (isRelativeMarkdownLink(href)) {
+					return processRelativeLink(
+						node,
+						href,
+						currentFilePath,
+						fileToPageIdMap,
+						settings,
+					);
 				}
 			}
 			return;
 		},
 	}) as JSONDocNode;
+}
+
+/**
+ * Checks if a link is a relative markdown link (not external URL).
+ */
+function isRelativeMarkdownLink(href: string): boolean {
+	// Skip external URLs
+	if (
+		href.startsWith("http://") ||
+		href.startsWith("https://") ||
+		href.startsWith("mailto:") ||
+		href.startsWith("#")
+	) {
+		return false;
+	}
+
+	// Check if it looks like a path to a markdown file
+	return (
+		href.endsWith(".md") ||
+		href.includes(".md#") ||
+		// Paths without extension that look like relative paths
+		href.startsWith("./") ||
+		href.startsWith("../") ||
+		(!href.includes("://") && !href.startsWith("#"))
+	);
+}
+
+/**
+ * Processes a wikilink and converts it to a Confluence URL.
+ */
+function processWikilink(
+	node: ADFEntity,
+	href: string,
+	currentFilePath: string,
+	fileToPageIdMap: Record<string, ConfluenceAdfFile>,
+	settings: ConfluenceSettings,
+): ADFEntity {
+	const wikilinkUrl = new URL(href);
+	const pathName = decodeURI(wikilinkUrl.pathname);
+
+	// If pathname is empty, it's a self-reference
+	if (wikilinkUrl.pathname === "") {
+		const currentFile = resolveLinkPath(
+			currentFilePath.replace(/\.md$/, ""),
+			currentFilePath,
+			fileToPageIdMap,
+		);
+		if (currentFile) {
+			return createConfluenceLink(
+				node,
+				currentFile,
+				wikilinkUrl.hash,
+				pathName,
+				settings,
+			);
+		}
+		return removeLink(node);
+	}
+
+	// Try to resolve the wikilink path
+	const linkPage = resolveLinkPath(
+		pathName,
+		currentFilePath,
+		fileToPageIdMap,
+	);
+
+	if (linkPage) {
+		return createConfluenceLink(
+			node,
+			linkPage,
+			wikilinkUrl.hash,
+			pathName,
+			settings,
+		);
+	}
+
+	// Link not found - remove the link mark
+	return removeLink(node);
+}
+
+/**
+ * Processes a relative markdown link and converts it to a Confluence URL.
+ */
+function processRelativeLink(
+	node: ADFEntity,
+	href: string,
+	currentFilePath: string,
+	fileToPageIdMap: Record<string, ConfluenceAdfFile>,
+	settings: ConfluenceSettings,
+): ADFEntity {
+	// Extract hash fragment if present
+	const [pathPart, hashFragment] = href.split("#");
+	const hash = hashFragment ? `#${hashFragment}` : "";
+
+	// Remove .md extension for path resolution
+	const linkPath = (pathPart ?? "").replace(/\.md$/, "");
+
+	// Try to resolve the link
+	const linkPage = resolveLinkPath(
+		linkPath,
+		currentFilePath,
+		fileToPageIdMap,
+	);
+
+	if (linkPage) {
+		return createConfluenceLink(node, linkPage, hash, linkPath, settings);
+	}
+
+	// Link not found - keep the original link (might be intentional external link)
+	return node;
+}
+
+/**
+ * Creates a Confluence link or inline card from a resolved page.
+ */
+function createConfluenceLink(
+	node: ADFEntity,
+	linkPage: ConfluenceAdfFile,
+	hash: string,
+	originalPathName: string,
+	settings: ConfluenceSettings,
+): ADFEntity {
+	const confluenceUrl = `${settings.confluenceBaseUrl}/wiki/spaces/${linkPage.spaceKey}/pages/${linkPage.pageId}${hash}`;
+
+	if (node.marks && node.marks[0]) {
+		node.marks[0].attrs = node.marks[0].attrs || {};
+		node.marks[0].attrs["href"] = confluenceUrl;
+
+		// If the link text matches the path, convert to inline card
+		if (node.text === `${originalPathName}${hash}`) {
+			node.type = "inlineCard";
+			node.attrs = { url: confluenceUrl };
+			delete node.marks;
+			delete node.text;
+		}
+	}
+
+	return node;
+}
+
+/**
+ * Removes the link mark from a node (for broken links).
+ */
+function removeLink(node: ADFEntity): ADFEntity {
+	if (node.marks && node.marks[0]) {
+		delete node.marks[0];
+	}
+	return node;
 }
 
 function removeEmptyProperties(adf: JSONDocNode) {

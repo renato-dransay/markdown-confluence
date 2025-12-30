@@ -6,3 +6,6 @@ export * as ConfluencePageConfig from "./ConniePageConfig";
 export * from "./SettingsLoader";
 export * from "./ADFToMarkdown";
 export * from "./ADFProcessingPlugins";
+export * from "./Validator";
+export * from "./Manifest";
+export * from "./TreeLocal";

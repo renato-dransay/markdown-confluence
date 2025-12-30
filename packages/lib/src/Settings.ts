@@ -6,6 +6,10 @@ export type ConfluenceSettings = {
 	folderToPublish: string;
 	contentRoot: string;
 	firstHeadingPageTitle: boolean;
+	dryRun: boolean;
+	validateOnly: boolean;
+	generateManifest: boolean;
+	manifestPath: string;
 };
 
 export const DEFAULT_SETTINGS: ConfluenceSettings = {
@@ -16,4 +20,8 @@ export const DEFAULT_SETTINGS: ConfluenceSettings = {
 	folderToPublish: "Confluence Pages",
 	contentRoot: process.cwd(),
 	firstHeadingPageTitle: false,
+	dryRun: false,
+	validateOnly: false,
+	generateManifest: false,
+	manifestPath: "confluence-manifest.json",
 };

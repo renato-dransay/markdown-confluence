@@ -1,4 +1,4 @@
-import { ConfluenceSettings } from "../Settings";
+import { ConfluenceSettings, DEFAULT_SETTINGS } from "../Settings";
 
 export abstract class SettingsLoader {
 	abstract loadPartial(): Partial<ConfluenceSettings>;
@@ -9,9 +9,19 @@ export abstract class SettingsLoader {
 		return settings;
 	}
 
+	loadForValidationOnly(): ConfluenceSettings {
+		const initialSettings = this.loadPartial();
+		const settings = this.validateSettingsForValidation(initialSettings);
+		return settings;
+	}
+
 	protected validateSettings(
 		settings: Partial<ConfluenceSettings>,
 	): ConfluenceSettings {
+		if (settings.validateOnly) {
+			return this.validateSettingsForValidation(settings);
+		}
+
 		if (!settings.confluenceBaseUrl) {
 			throw new Error("Confluence base URL is required");
 		}
@@ -44,6 +54,52 @@ export abstract class SettingsLoader {
 			settings.firstHeadingPageTitle = false;
 		}
 
+		if (!("dryRun" in settings)) {
+			settings.dryRun = DEFAULT_SETTINGS.dryRun;
+		}
+
+		if (!("validateOnly" in settings)) {
+			settings.validateOnly = DEFAULT_SETTINGS.validateOnly;
+		}
+
+		if (!("generateManifest" in settings)) {
+			settings.generateManifest = DEFAULT_SETTINGS.generateManifest;
+		}
+
+		if (!settings.manifestPath) {
+			settings.manifestPath = DEFAULT_SETTINGS.manifestPath;
+		}
+
 		return settings as ConfluenceSettings;
+	}
+
+	protected validateSettingsForValidation(
+		settings: Partial<ConfluenceSettings>,
+	): ConfluenceSettings {
+		if (!settings.folderToPublish) {
+			settings.folderToPublish = DEFAULT_SETTINGS.folderToPublish;
+		}
+
+		if (!settings.contentRoot) {
+			settings.contentRoot = DEFAULT_SETTINGS.contentRoot;
+		}
+
+		if (!settings.contentRoot.endsWith("/")) {
+			settings.contentRoot += "/";
+		}
+
+		if (!("firstHeadingPageTitle" in settings)) {
+			settings.firstHeadingPageTitle = false;
+		}
+
+		if (!settings.confluenceBaseUrl) {
+			settings.confluenceBaseUrl = "https://placeholder.atlassian.net";
+		}
+
+		return {
+			...DEFAULT_SETTINGS,
+			...settings,
+			validateOnly: true,
+		} as ConfluenceSettings;
 	}
 }

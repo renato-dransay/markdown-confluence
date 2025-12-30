@@ -57,6 +57,33 @@ export class CommandLineArgumentSettingsLoader extends SettingsLoader {
 				type: "boolean",
 				demandOption: false,
 			})
+			.option("dryRun", {
+				alias: "d",
+				describe:
+					"Validate and show what would be published without making any changes to Confluence.",
+				type: "boolean",
+				demandOption: false,
+			})
+			.option("validateOnly", {
+				alias: "v",
+				describe:
+					"Only run validation checks without publishing. Exits with code 1 if validation fails.",
+				type: "boolean",
+				demandOption: false,
+			})
+			.option("generateManifest", {
+				alias: "m",
+				describe:
+					"Generate a manifest file after publishing with details of all published pages.",
+				type: "boolean",
+				demandOption: false,
+			})
+			.option("manifestPath", {
+				describe:
+					"Path for the manifest file (default: confluence-manifest.json).",
+				type: "string",
+				demandOption: false,
+			})
 			.parseSync();
 
 		return {
@@ -80,6 +107,16 @@ export class CommandLineArgumentSettingsLoader extends SettingsLoader {
 				: undefined),
 			...(options.firstHeaderPageTitle
 				? { firstHeadingPageTitle: options.firstHeaderPageTitle }
+				: undefined),
+			...(options.dryRun ? { dryRun: options.dryRun } : undefined),
+			...(options.validateOnly
+				? { validateOnly: options.validateOnly }
+				: undefined),
+			...(options.generateManifest
+				? { generateManifest: options.generateManifest }
+				: undefined),
+			...(options.manifestPath
+				? { manifestPath: options.manifestPath }
 				: undefined),
 		};
 	}

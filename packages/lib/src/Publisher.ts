@@ -10,9 +10,13 @@ import { CurrentAttachments } from "./Attachments";
 import { PageContentType } from "./ConniePageConfig";
 import { SettingsLoader } from "./SettingsLoader";
 import { ensureAllFilesExistInConfluence } from "./TreeConfluence";
-import { createFolderStructure as createLocalAdfTree } from "./TreeLocal";
+import {
+	createFolderStructure as createLocalAdfTree,
+	createFolderStructureWithValidation,
+} from "./TreeLocal";
 import { LoaderAdaptor, RequiredConfluenceClient } from "./adaptors";
 import { isEqual } from "./isEqual";
+import { ValidationResult, formatValidationResult } from "./Validator";
 
 export interface LocalAdfFileTreeNode {
 	name: string;
@@ -20,7 +24,7 @@ export interface LocalAdfFileTreeNode {
 	file?: LocalAdfFile;
 }
 
-interface FilePublishResult {
+export interface FilePublishResult {
 	successfulUploadResult?: UploadAdfFileResult;
 	node: ConfluenceNode;
 	reason?: string;
@@ -92,6 +96,25 @@ export interface UploadAdfFileResult {
 	labelResult: "same" | "updated";
 }
 
+export interface DryRunResult {
+	validation: ValidationResult;
+	pages: DryRunPage[];
+	summary: {
+		total: number;
+		wouldCreate: number;
+		wouldUpdate: number;
+		unchanged: number;
+	};
+}
+
+export interface DryRunPage {
+	source: string;
+	title: string;
+	action: "create" | "update" | "unchanged";
+	confluenceId?: string;
+	reason?: string;
+}
+
 export class Publisher {
 	private confluenceClient: RequiredConfluenceClient;
 	private adaptor: LoaderAdaptor;
@@ -114,7 +137,121 @@ export class Publisher {
 		);
 	}
 
-	async publish(publishFilter?: string) {
+	async validate(): Promise<ValidationResult> {
+		const settings = this.settingsLoader.load();
+		const files = await this.adaptor.getMarkdownFilesToUpload();
+		const result = createFolderStructureWithValidation(files, settings);
+		return result.validation;
+	}
+
+	async dryRun(): Promise<DryRunResult> {
+		const settings = this.settingsLoader.load();
+
+		const files = await this.adaptor.getMarkdownFilesToUpload();
+		const result = createFolderStructureWithValidation(files, settings);
+
+		if (!result.validation.valid) {
+			return {
+				validation: result.validation,
+				pages: [],
+				summary: {
+					total: result.validation.summary.totalFiles,
+					wouldCreate: 0,
+					wouldUpdate: 0,
+					unchanged: 0,
+				},
+			};
+		}
+
+		if (!this.myAccountId) {
+			const currentUser =
+				await this.confluenceClient.users.getCurrentUser();
+			this.myAccountId = currentUser.accountId;
+		}
+
+		const parentPage = await this.confluenceClient.content.getContentById({
+			id: settings.confluenceParentId,
+			expand: ["body.atlas_doc_format", "space"],
+		});
+		if (!parentPage.space) {
+			throw new Error("Missing Space Key");
+		}
+
+		const spaceToPublishTo = parentPage.space;
+
+		const confluencePagesToPublish = await ensureAllFilesExistInConfluence(
+			this.confluenceClient,
+			this.adaptor,
+			result.tree,
+			spaceToPublishTo.key,
+			parentPage.id,
+			parentPage.id,
+			settings,
+		);
+
+		const pages: DryRunPage[] = [];
+		let wouldCreate = 0;
+		let wouldUpdate = 0;
+		let unchanged = 0;
+
+		for (const node of confluencePagesToPublish) {
+			const existingContent = node.existingPageData.adfContent;
+			const newContent = node.file.contents;
+
+			const hasExistingContent =
+				existingContent &&
+				existingContent.content &&
+				existingContent.content.length > 0;
+
+			const isBlankPage =
+				hasExistingContent &&
+				existingContent.content.length === 1 &&
+				existingContent.content[0]?.type === "paragraph" &&
+				existingContent.content[0]?.content?.[0]?.text ===
+					"Page not published yet";
+
+			if (isBlankPage) {
+				wouldCreate++;
+				pages.push({
+					source: node.file.absoluteFilePath,
+					title: node.file.pageTitle,
+					action: "create",
+					confluenceId: node.file.pageId,
+					reason: "New page (placeholder exists)",
+				});
+			} else if (!adfEqual(existingContent, newContent)) {
+				wouldUpdate++;
+				pages.push({
+					source: node.file.absoluteFilePath,
+					title: node.file.pageTitle,
+					action: "update",
+					confluenceId: node.file.pageId,
+					reason: "Content changed",
+				});
+			} else {
+				unchanged++;
+				pages.push({
+					source: node.file.absoluteFilePath,
+					title: node.file.pageTitle,
+					action: "unchanged",
+					confluenceId: node.file.pageId,
+				});
+			}
+		}
+
+		return {
+			validation: result.validation,
+			pages,
+			summary: {
+				total: confluencePagesToPublish.length,
+				wouldCreate,
+				wouldUpdate,
+				unchanged,
+			},
+		};
+	}
+
+	async publish(publishFilter?: string): Promise<FilePublishResult[]> {
 		const settings = this.settingsLoader.load();
 
 		if (!this.myAccountId) {
@@ -179,15 +316,33 @@ export class Publisher {
 			if (e instanceof Error) {
 				return {
 					node,
-					reason: e.message,
+					reason: this.formatError(e, node.file),
 				};
 			}
 
 			return {
 				node,
-				reason: JSON.stringify(e), // TODO: Understand why this doesn't show error message properly
+				reason: JSON.stringify(e),
 			};
 		}
+	}
+
+	private formatError(error: Error, file: ConfluenceAdfFile): string {
+		const baseMessage = error.message;
+
+		if (baseMessage.includes("last updated by another user")) {
+			return `Page "${file.pageTitle}" was modified by another user since last sync. Manual review required.`;
+		}
+
+		if (baseMessage.includes("Cannot convert between content types")) {
+			return `Cannot change content type for "${file.pageTitle}". ${baseMessage}`;
+		}
+
+		if (baseMessage.includes("is trying to overwrite a page outside")) {
+			return `Page "${file.pageTitle}" would overwrite an existing page outside your publish tree. Check if this title already exists in the space.`;
+		}
+
+		return `Failed to publish "${file.pageTitle}": ${baseMessage}`;
 	}
 
 	private async updatePageContent(
@@ -245,33 +400,6 @@ export class Publisher {
 			supportFunctions,
 		);
 
-		/*
-		const imageResult = Object.keys(imageUploadResult.imageMap).reduce(
-			(prev, curr) => {
-				const value = imageUploadResult.imageMap[curr];
-				if (!value) {
-					return prev;
-				}
-				const status = value.status;
-				return {
-					...prev,
-					[status]: (prev[status] ?? 0) + 1,
-				};
-			},
-			{
-				existing: 0,
-				uploaded: 0,
-			} as Record<string, number>
-		);
-		*/
-
-		/*
-		if (!adfEqual(adfFile.contents, imageUploadResult.adf)) {
-			result.imageResult =
-				(imageResult["uploaded"] ?? 0) > 0 ? "updated" : "same";
-		}
-		*/
-
 		result.imageResult = "updated";
 
 		const existingPageDetails = {
@@ -301,13 +429,6 @@ export class Publisher {
 			!isEqual(existingPageDetails, newPageDetails)
 		) {
 			result.contentResult = "updated";
-			console.log(`TESTING DIFF - ${adfFile.absoluteFilePath}`);
-
-			const replacer = (_key: unknown, value: unknown) =>
-				typeof value === "undefined" ? null : value;
-
-			console.log(JSON.stringify(existingPageData.adfContent, replacer));
-			console.log(JSON.stringify(adfToUpload, replacer));
 
 			const updateContentDetails = {
 				...newPageDetails,
@@ -370,4 +491,56 @@ export class Publisher {
 
 		return result;
 	}
+}
+
+export function formatDryRunResult(result: DryRunResult): string {
+	const lines: string[] = [];
+
+	lines.push(`\n=== Dry Run Summary ===`);
+
+	if (!result.validation.valid) {
+		lines.push(`\nValidation FAILED - cannot proceed with publishing`);
+		lines.push(formatValidationResult(result.validation));
+		return lines.join("\n");
+	}
+
+	lines.push(`Validation: PASSED`);
+	lines.push(`\nPages to process: ${result.summary.total}`);
+	lines.push(`  Would create: ${result.summary.wouldCreate}`);
+	lines.push(`  Would update: ${result.summary.wouldUpdate}`);
+	lines.push(`  Unchanged: ${result.summary.unchanged}`);
+
+	if (result.pages.length > 0) {
+		lines.push(`\n--- Page Details ---`);
+
+		const creates = result.pages.filter((p) => p.action === "create");
+		const updates = result.pages.filter((p) => p.action === "update");
+		const unchanged = result.pages.filter((p) => p.action === "unchanged");
+
+		if (creates.length > 0) {
+			lines.push(`\nWould CREATE:`);
+			for (const page of creates) {
+				lines.push(`  + ${page.title}`);
+				lines.push(`    Source: ${page.source}`);
+			}
+		}
+
+		if (updates.length > 0) {
+			lines.push(`\nWould UPDATE:`);
+			for (const page of updates) {
+				lines.push(`  ~ ${page.title}`);
+				lines.push(`    Source: ${page.source}`);
+				lines.push(`    Confluence ID: ${page.confluenceId}`);
+			}
+		}
+
+		if (unchanged.length > 0) {
+			lines.push(`\nUNCHANGED:`);
+			for (const page of unchanged) {
+				lines.push(`  = ${page.title}`);
+			}
+		}
+	}
+
+	return lines.join("\n");
 }
