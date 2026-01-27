@@ -9,13 +9,11 @@ import {
 	AutoSettingsLoader,
 	FileSystemAdaptor,
 	Publisher,
-	MermaidRendererPlugin,
 	formatDryRunResult,
 	formatValidationResult,
 	createManifest,
 	formatManifestSummary,
 } from "@markdown-confluence/lib";
-import { PuppeteerMermaidRenderer } from "@markdown-confluence/mermaid-puppeteer-renderer";
 import { ConfluenceClient } from "confluence.js";
 
 async function main() {
@@ -94,9 +92,7 @@ async function main() {
 		},
 	});
 
-	const publisher = new Publisher(adaptor, settingLoader, confluenceClient, [
-		new MermaidRendererPlugin(new PuppeteerMermaidRenderer()),
-	]);
+	const publisher = new Publisher(adaptor, settingLoader, confluenceClient, []);
 
 	if (settings.dryRun) {
 		console.log(chalk.blue("Running in dry-run mode..."));
