@@ -93,11 +93,15 @@ export default class ConfluencePlugin extends Plugin {
 		});
 
 		const settingsLoader = new StaticSettingsLoader(this.settings);
+		const plugins =
+			this.settings.mermaidRenderer === "puppeteer"
+				? [new MermaidRendererPlugin(mermaidRenderer)]
+				: [];
 		this.publisher = new Publisher(
 			this.adaptor,
 			settingsLoader,
 			confluenceClient,
-			[new MermaidRendererPlugin(mermaidRenderer)],
+			plugins,
 		);
 	}
 

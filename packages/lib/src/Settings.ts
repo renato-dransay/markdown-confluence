@@ -1,3 +1,5 @@
+export type MermaidRenderer = "none" | "puppeteer";
+
 export type ConfluenceSettings = {
 	confluenceBaseUrl: string;
 	confluenceParentId: string;
@@ -10,6 +12,7 @@ export type ConfluenceSettings = {
 	validateOnly: boolean;
 	generateManifest: boolean;
 	manifestPath: string;
+	mermaidRenderer: MermaidRenderer;
 };
 
 export const DEFAULT_SETTINGS: ConfluenceSettings = {
@@ -24,4 +27,5 @@ export const DEFAULT_SETTINGS: ConfluenceSettings = {
 	validateOnly: false,
 	generateManifest: false,
 	manifestPath: "confluence-manifest.json",
+	mermaidRenderer: "none",
 };
